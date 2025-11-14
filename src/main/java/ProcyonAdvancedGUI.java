@@ -70,12 +70,15 @@ public class ProcyonAdvancedGUI extends JFrame {
     private JButton loadProjectButton;
     private JButton saveButton;
     private JButton resetButton;
+    private JButton optionsButton;
     // Map pour stocker le code décompilé d'origine de toutes les classes
     private Map<String, String> originalCode = new HashMap<>();
     private final File cacheDir = new File(".paladiumcache");
     private JButton clearCacheButton;
     private JButton refreshTreeButton;
     private JLabel obfuscatedClassesLabel; // Nouveau label pour afficher le compteur
+    // Index: nom simple de classe -> chemin complet (clé classBytes)
+    private final Map<String, String> simpleNameIndex = new HashMap<>();
 
     public ProcyonAdvancedGUI() {
         // Config fenêtre
@@ -114,6 +117,7 @@ public class ProcyonAdvancedGUI extends JFrame {
         exportJarButton = new JButton("Exporter en JAR");
         exportCompiledJarButton = new JButton("Exporter en JAR compilé");
         themeButton = new JButton("Thème clair/sombre");
+        optionsButton = new JButton("Options");
         saveProjectButton = new JButton("Sauvegarder projet");
         loadProjectButton = new JButton("Charger projet");
         searchButton = new JButton("Rechercher");
@@ -123,6 +127,11 @@ public class ProcyonAdvancedGUI extends JFrame {
         JButton aiAnalysisButton = new JButton("🤖 Analyse IA avancée");
         aiAnalysisButton.setToolTipText("Analyse IA avancée pour renommer automatiquement les classes");
         aiAnalysisButton.addActionListener(e -> advancedAIAnalysisAndRename());
+
+        // Bouton pour analyser toutes les classes avec Ollama et proposer un nouvel arbre en preview
+        JButton analyzeAllOllamaButton = new JButton("Analyser tout (Ollama)");
+        analyzeAllOllamaButton.setToolTipText("Analyse toutes les classes avec Ollama et propose un nouvel arbre en prévisualisation");
+        analyzeAllOllamaButton.addActionListener(e -> analyzeAllWithOllamaPreview());
 
         searchField = new JTextField(30);
         globalSearchField = new JTextField(20);
@@ -158,6 +167,7 @@ public class ProcyonAdvancedGUI extends JFrame {
         exportJarButton.addActionListener(e -> exportManager.exportToJar());
         exportCompiledJarButton.addActionListener(e -> exportManager.exportToCompiledJar());
         themeButton.addActionListener(e -> themeManager.toggleTheme());
+        optionsButton.addActionListener(e -> showOptionsDialog());
         saveProjectButton.addActionListener(e -> projectManager.saveProjectState());
         loadProjectButton.addActionListener(e -> projectManager.loadProjectState(
                 () -> treeManager.updateTreeWithPackages(new ArrayList<>(classBytes.keySet())),
@@ -201,9 +211,11 @@ public class ProcyonAdvancedGUI extends JFrame {
         actionPanel.add(exportJarButton);
         actionPanel.add(exportCompiledJarButton);
         actionPanel.add(themeButton);
+        actionPanel.add(optionsButton);
         actionPanel.add(saveProjectButton);
         actionPanel.add(loadProjectButton);
         actionPanel.add(aiAnalysisButton);
+        actionPanel.add(analyzeAllOllamaButton);
         actionPanel.add(clearCacheButton);
         actionPanel.add(refreshTreeButton);
         actionPanel.add(obfuscatedClassesLabel);
@@ -238,6 +250,8 @@ public class ProcyonAdvancedGUI extends JFrame {
         // ========== ARBRE DE CLASSES & TREEMANAGER ==========
         classTree = new JTree(new DefaultMutableTreeNode("Aucun fichier ouvert"));
         classTree.setRootVisible(true);
+        // Sélection multiple pour analyser plusieurs classes à la fois
+        classTree.getSelectionModel().setSelectionMode(javax.swing.tree.TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION);
 
         treeManager = new TreeManager(classTree, classToDisplayName);
 
@@ -296,16 +310,44 @@ public class ProcyonAdvancedGUI extends JFrame {
         JMenuItem renameItem = new JMenuItem("Renommer la classe...");
         JMenuItem analyzeItem = new JMenuItem("🤖 Analyser avec IA...");
         JMenuItem analyzeOllamaItem = new JMenuItem("🔎 Analyse IA Ollama");
+        JMenuItem analyzeOllamaMultiItem = new JMenuItem("🔎 Analyse Ollama (sélection multiple)");
         popupMenu.add(renameItem);
         popupMenu.add(analyzeItem);
         popupMenu.add(analyzeOllamaItem);
+        popupMenu.add(analyzeOllamaMultiItem);
         classTree.setComponentPopupMenu(popupMenu);
         classTree.addMouseListener(new java.awt.event.MouseAdapter() {
             public void mousePressed(java.awt.event.MouseEvent e) {
                 if (e.isPopupTrigger() || SwingUtilities.isRightMouseButton(e)) {
                     int row = classTree.getClosestRowForLocation(e.getX(), e.getY());
-                    classTree.setSelectionRow(row);
-                    DefaultMutableTreeNode node = (DefaultMutableTreeNode) classTree.getLastSelectedPathComponent();
+                    if (row != -1) {
+                        TreePath path = classTree.getPathForRow(row);
+                        if (path != null) {
+                            TreePath[] selected = classTree.getSelectionPaths();
+                            boolean alreadySelected = false;
+                            if (selected != null) {
+                                for (TreePath p : selected) {
+                                    if (p.equals(path)) {
+                                        alreadySelected = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            // Ne pas casser la sélection si on clique sur un élément déjà sélectionné
+                            if (!alreadySelected) {
+                                if (e.isControlDown() || e.isShiftDown()) {
+                                    classTree.addSelectionPath(path);
+                                } else {
+                                    classTree.setSelectionPath(path);
+                                }
+                            }
+                        }
+                    }
+                    DefaultMutableTreeNode node = null;
+                    TreePath last = classTree.getSelectionPath();
+                    if (last != null) {
+                        node = (DefaultMutableTreeNode) last.getLastPathComponent();
+                    }
                     if (node != null && node.getUserObject() instanceof TreeManager.ClassNode) {
                         popupMenu.show(classTree, e.getX(), e.getY());
                     }
@@ -447,6 +489,8 @@ public class ProcyonAdvancedGUI extends JFrame {
                             if (!newPkg.isEmpty() && !newClass.isEmpty()) {
                                 String newFull = newPkg.replace('.', '/') + "/" + newClass + ".class";
                                 renameClassEverywhereAndUpdateKeys(className.replace("\\.class", ".class"), simpleClassName, newClass);
+                                // Reindexer après renommage
+                                reindexAllSimpleNames();
                                 classToDisplayName.put(newFull, newClass);
                                 if (res == 1) {
                                     JOptionPane.showMessageDialog(ProcyonAdvancedGUI.this,
@@ -464,6 +508,16 @@ public class ProcyonAdvancedGUI extends JFrame {
                 }
             }).start();
             waitDialog.setVisible(true);
+        });
+
+        // Analyse via Ollama pour une sélection multiple (batch)
+        analyzeOllamaMultiItem.addActionListener(ev -> {
+            javax.swing.tree.TreePath[] paths = classTree.getSelectionPaths();
+            if (paths != null && paths.length > 1) {
+                analyzeSelectedClassesWithOllama(paths);
+            } else {
+                JOptionPane.showMessageDialog(this, "Sélectionnez plusieurs classes (Ctrl/Cmd+clic) puis relancez.");
+            }
         });
 
         // Action pour le renommage manuel via le menu contextuel
@@ -629,6 +683,9 @@ public class ProcyonAdvancedGUI extends JFrame {
                             if (area != null) openTabs.put(newFull, area);
                             // Met à jour l'objet ClassNode
                             classNode.fullPath = newFull;
+                            // Met à jour l'index simpleName -> fullPath (le nom simple reste identique)
+                            String simple = className.replace(".class", "");
+                            simpleNameIndex.put(simple, newFull);
                             // Met à jour toutes les références dans toutes les classes
                             renameClassEverywhere(oldFull, className.replace(".class", ""), className.replace(".class", ""));
                             // Met à jour l'arbre
@@ -693,7 +750,12 @@ public class ProcyonAdvancedGUI extends JFrame {
             referenceManager.clear();
             originalCode.clear();
             modifiedCode.clear();
+            simpleNameIndex.clear();
             List<String> classNames = decompilerManager.loadJar(jarFile);
+            // Indexe tous les noms simples pour accélérer la navigation
+            for (String className : classNames) {
+                indexClassKey(className);
+            }
             for (String className : classNames) {
                 classToDisplayName.put(className, className);
                 referenceManager.indexClassReferences(className, classBytes.get(className));
@@ -781,12 +843,171 @@ public class ProcyonAdvancedGUI extends JFrame {
         referenceManager.indexClassReferences(className, bytes);
     }
 
+    // Suggestion renaming IA (rapide + fallback analyse profonde)
+    private AISuggestion suggestWithDeepContext(String classKey) {
+        try {
+            String simple = getSimpleClassName(classKey);
+
+            // Passe 1: code + usages directs
+            String code = classCode(classKey);
+            StringBuilder usagesCode = new StringBuilder();
+            Set<String> l1Usages = getUsagesOf(classKey); // classes qui utilisent classKey
+            int count = 0;
+            for (String u : l1Usages) {
+                if (count++ >= 8) break;
+                usagesCode.append("// usage L1: ").append(u).append("\n");
+                usagesCode.append(limitStr(classCode(u), 900)).append("\n\n");
+            }
+
+            String prompt1 =
+                    "Tu es un assistant Java/Minecraft. Analyse le code d'une classe obfusquée et ses usages directs pour déduire son rôle.\n" +
+                    "Retourne STRICTEMENT un JSON: {\"suggestedClassName\":\"...\",\"suggestedPackage\":\"...\",\"reasoning\":\"...\"}\n" +
+                    "N'inclus aucun texte hors JSON.\n\n" +
+                    "// target\n" + limitStr(code, 6000) + "\n\n" +
+                    "// usages_directs\n" + limitStr(usagesCode.toString(), 6000);
+
+            String resp1 = OllamaApi.askOllama("gpt-oss:20b", prompt1);
+            String json1 = extractFirstJsonObject(resp1);
+            String sName1 = extractJsonField(json1, "suggestedClassName");
+            String sPkg1  = extractJsonField(json1, "suggestedPackage");
+
+            if (!isWeakSuggestion(sName1, simple) || (sPkg1 != null && !sPkg1.isEmpty())) {
+                return new AISuggestion(
+                        (sName1 == null || sName1.isEmpty()) ? simple : sName1,
+                        sPkg1,
+                        extractJsonField(json1, "reasoning")
+                );
+            }
+
+            // Passe 2 (fallback): contexte profond (usages + usages des usages + références sortantes)
+            String deepContext = buildDeepContextText(classKey, 8, 3, 1000);
+            String prompt2 =
+                    "Analyse en profondeur le graphe d'usages et de dépendances pour comprendre la responsabilité de la classe cible.\n" +
+                    "Déduis un nom et un package clairs et spécifiques (éviter Generic/Helper/Util si possible).\n" +
+                    "Retourne STRICTEMENT JSON: {\"suggestedClassName\":\"...\",\"suggestedPackage\":\"...\",\"reasoning\":\"...\"}\n" +
+                    "Aucun texte hors JSON.\n\n" +
+                    deepContext;
+
+            String resp2 = OllamaApi.askOllama("gpt-oss:20b", prompt2);
+            String json2 = extractFirstJsonObject(resp2);
+            String sName2 = extractJsonField(json2, "suggestedClassName");
+            String sPkg2  = extractJsonField(json2, "suggestedPackage");
+
+            return new AISuggestion(
+                    (sName2 == null || sName2.isEmpty()) ? simple : sName2,
+                    (sPkg2 == null || sPkg2.isEmpty()) ? "" : sPkg2,
+                    extractJsonField(json2, "reasoning")
+            );
+        } catch (Exception ex) {
+            System.out.println("[Ollama deep] Fallback simple pour " + classKey + " : " + ex.getMessage());
+            return new AISuggestion(getSimpleClassName(classKey), "", "");
+        }
+    }
+
+    // Construit un contexte profond: code cible + usages L1 + (pour chaque usage) ses usages L2 + refs sortantes de la cible
+    private String buildDeepContextText(String target, int maxL1, int maxL2PerL1, int codeLimitPerClass) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("TARGET: ").append(target).append("\n");
+        sb.append("// code_target\n").append(limitStr(classCode(target), 6000)).append("\n\n");
+
+        // Références sortantes (ce que la cible utilise)
+        Set<String> outRefs = getOutgoingRefs(target);
+        if (!outRefs.isEmpty()) {
+            sb.append("// refs_sortantes_de_target\n");
+            int c = 0;
+            for (String r : outRefs) {
+                if (c++ >= 6) break;
+                sb.append("/* ref_out: ").append(r).append(" */\n");
+                sb.append(limitStr(classCode(r), codeLimitPerClass)).append("\n\n");
+            }
+        }
+
+        // Usages de la cible (qui utilise target)
+        Set<String> l1Usages = getUsagesOf(target);
+        int i = 0;
+        for (String u1 : l1Usages) {
+            if (i++ >= maxL1) break;
+            sb.append("// usage_L1: ").append(u1).append("\n");
+            sb.append(limitStr(classCode(u1), codeLimitPerClass)).append("\n");
+
+            // Usages des usages (L2)
+            Set<String> l2Usages = getUsagesOf(u1);
+            int j = 0;
+            for (String u2 : l2Usages) {
+                if (j++ >= maxL2PerL1) break;
+                sb.append("//   usage_L2: ").append(u2).append("\n");
+                sb.append(limitStr(classCode(u2), Math.max(400, codeLimitPerClass / 3))).append("\n");
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    // Retourne le code (modifié ou décompilé) d'une classe
+    private String classCode(String classKey) {
+        try {
+            if (modifiedCode.containsKey(classKey)) {
+                return modifiedCode.get(classKey);
+            }
+            byte[] b = classBytes.get(classKey);
+            if (b == null) return "";
+            return decompilerManager.decompileClassToString(classKey, b);
+        } catch (Exception ex) {
+            return "";
+        }
+    }
+
+    // Usages de 'classKey' (classes qui la référencent)
+    private Set<String> getUsagesOf(String classKey) {
+        Set<String> usages = new HashSet<>();
+        for (Map.Entry<String, Set<String>> e : referencesTo.entrySet()) {
+            if (e.getValue().contains(classKey)) usages.add(e.getKey());
+        }
+        return usages;
+    }
+
+    // Références sortantes (classes référencées par 'classKey')
+    private Set<String> getOutgoingRefs(String classKey) {
+        Set<String> out = referencesTo.get(classKey);
+        return (out != null) ? new HashSet<>(out) : new HashSet<>();
+    }
+
+    // Détection d'une suggestion trop faible/générique
+    private boolean isWeakSuggestion(String suggested, String simple) {
+        if (suggested == null || suggested.isEmpty()) return true;
+        if (suggested.equals(simple)) return true;
+        String s = suggested.toLowerCase(Locale.ROOT);
+        if (s.length() <= 3) return true;
+        return s.contains("unknown") || s.contains("generic") || s.contains("helper") || s.contains("util");
+    }
+
+    // Extrait le premier objet JSON probable d'une chaîne
+    private String extractFirstJsonObject(String s) {
+        if (s == null) return "{}";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{[^}]*\\}").matcher(s);
+        if (m.find()) return m.group();
+        return s;
+    }
+
+    // Limite la longueur d'une chaîne
+    private String limitStr(String s, int max) {
+        if (s == null) return "";
+        if (s.length() <= max) return s;
+        return s.substring(0, max);
+    }
+
+    // Conteneur de suggestion IA
+    private record AISuggestion(String suggestedClassName, String suggestedPackage, String reasoning) {}
+
     private void openClass(File file) {
         try {
         classBytes.clear();
         classToDisplayName.clear();
             referenceManager.clear();
+            simpleNameIndex.clear();
             decompilerManager.loadClass(file);
+            // Indexer le nom simple de la classe chargée
+            indexClassKey(file.getName());
             // classBytes est déjà rempli par loadClass
             referenceManager.indexClassReferences(file.getName(), classBytes.get(file.getName()));
             treeManager.updateTreeWithPackages(Collections.singletonList(file.getName()));
@@ -827,6 +1048,9 @@ public class ProcyonAdvancedGUI extends JFrame {
                 RSyntaxTextArea newArea = openTabs.get(className);
                 if (newArea != null) {
                     codeEditorManager.setupEditor(newArea, () -> {});
+                    // Réattache explicitement Ctrl+clic et surbrillance occurrences
+                    addCtrlClickListener(newArea);
+                    addHighlightOccurrences(newArea);
                     themeManager.setTextAreas(openTabs.values());
                 }
             });
@@ -1051,16 +1275,8 @@ public class ProcyonAdvancedGUI extends JFrame {
                             
                             System.out.println("DEBUG: Navigation vers " + className + "." + memberName);
                             
-                            // Chercher la classe correspondante
-                            String classToOpen = null;
-                            for (String classKey : classBytes.keySet()) {
-                                String simple = classKey.endsWith(".class") ? classKey.substring(0, classKey.length() - 6) : classKey;
-                                simple = simple.substring(simple.lastIndexOf('/') + 1);
-                                if (className.equals(simple)) {
-                                    classToOpen = classKey;
-                                    break;
-                                }
-                            }
+                            // Chercher la classe correspondante (via index)
+                            String classToOpen = findClassBySimpleName(className);
                             
                             if (classToOpen != null) {
                                 // Ouvrir la classe et naviguer vers le membre
@@ -1077,16 +1293,8 @@ public class ProcyonAdvancedGUI extends JFrame {
                             isDotClass = true;
                         }
                         
-                        // Chercher la classe correspondante
-                        String classToOpen = null;
-                        for (String className : classBytes.keySet()) {
-                            String simple = className.endsWith(".class") ? className.substring(0, className.length() - 6) : className;
-                            simple = simple.substring(simple.lastIndexOf('/') + 1);
-                            if (word.equals(simple)) {
-                                classToOpen = className;
-                                break;
-                            }
-                        }
+                        // Chercher la classe correspondante (via index)
+                        String classToOpen = findClassBySimpleName(word);
                         
                         // Si c'est un .class explicite, n'ouvrir que si la classe existe
                         if (isDotClass && classToOpen != null) {
@@ -1124,15 +1332,9 @@ public class ProcyonAdvancedGUI extends JFrame {
                         boolean isVar = false;
                         boolean isEnumConst = false;
                         // Vérifie si c'est une classe connue
-                        String foundClass = null;
-                        for (String className : classBytes.keySet()) {
-                            String simple = className.endsWith(".class") ? className.substring(0, className.length() - 6) : className;
-                            simple = simple.substring(simple.lastIndexOf('/') + 1);
-                            if (word.equals(simple)) {
-                                foundClass = className;
-                                isClass = true;
-                                break;
-                            }
+                        String foundClass = findClassBySimpleName(word);
+                        if (foundClass != null) {
+                            isClass = true;
                         }
                         
                         // Analyse contextuelle plus précise pour déterminer le type d'identifiant
@@ -1247,6 +1449,8 @@ public class ProcyonAdvancedGUI extends JFrame {
                                 String newName = JOptionPane.showInputDialog(ProcyonAdvancedGUI.this, "Nouveau nom de classe :", word);
                                 if (newName != null && !newName.trim().isEmpty() && !newName.equals(word)) {
                                     renameClassEverywhereAndUpdateKeys(finalFound, word, newName);
+                                    // Reindexer les noms simples après modification des clés
+                                    reindexAllSimpleNames();
                                 }
                             });
                             popup.add(renameClass);
@@ -1525,16 +1729,10 @@ public class ProcyonAdvancedGUI extends JFrame {
                         }
                         String word = text.substring(start, end);
                         // Vérifier si c'est une classe connue
-                        String found = null;
+                        String found = findClassBySimpleName(word);
                         String fullPath = null;
-                        for (String className : classBytes.keySet()) {
-                            String simple = className.endsWith(".class") ? className.substring(0, className.length() - 6) : className;
-                            simple = simple.substring(simple.lastIndexOf('/') + 1);
-                            if (word.equals(simple)) {
-                                found = className;
-                                fullPath = className.replace("/", ".").replace(".class", "");
-                                break;
-                            }
+                        if (found != null) {
+                            fullPath = found.replace("/", ".").replace(".class", "");
                         }
                         if (found != null) {
                             area.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
@@ -1792,6 +1990,10 @@ public class ProcyonAdvancedGUI extends JFrame {
         globalSearchResults.setVisible(globalSearchListModel.getSize() > 0);
     }
 
+    private void showOptionsDialog() {
+        JOptionPane.showMessageDialog(this, "Options à venir.", "Options", JOptionPane.INFORMATION_MESSAGE);
+    }
+
     private void refreshTree() {
         treeManager.updateTreeIncrementally(new ArrayList<>(classBytes.keySet()));
         updateObfuscatedClassesCount();
@@ -1993,6 +2195,13 @@ public class ProcyonAdvancedGUI extends JFrame {
             if (modifiedCode.containsKey(oldKey)) modifiedCode.put(newKey, modifiedCode.remove(oldKey));
             if (openTabs.containsKey(oldKey)) openTabs.put(newKey, openTabs.remove(oldKey));
             if (classToDisplayName.containsKey(oldKey)) classToDisplayName.put(newKey, classToDisplayName.remove(oldKey));
+            // Mettre à jour l'index des noms simples
+            String oldSimple = getSimpleClassName(oldKey);
+            String newSimple = getSimpleClassName(newKey);
+            if (!oldSimple.equals(newSimple)) {
+                simpleNameIndex.remove(oldSimple);
+            }
+            simpleNameIndex.put(newSimple, newKey);
         }
                 
                 // Mise à jour du statut pour la phase de mise à jour des références
@@ -2276,6 +2485,26 @@ public class ProcyonAdvancedGUI extends JFrame {
     private String capitalize(String s) {
         if (s == null || s.isEmpty()) return "";
         return s.substring(0, 1).toUpperCase() + s.substring(1);
+    }
+
+    // Indexation des noms simples de classes
+    private void indexClassKey(String classKey) {
+        if (classKey == null || classKey.isEmpty()) return;
+        String simple = getSimpleClassName(classKey);
+        if (simple != null && !simple.isEmpty()) {
+            simpleNameIndex.put(simple, classKey);
+        }
+    }
+
+    private void reindexAllSimpleNames() {
+        simpleNameIndex.clear();
+        for (String k : classBytes.keySet()) {
+            indexClassKey(k);
+        }
+    }
+
+    private String findClassBySimpleName(String simpleName) {
+        return simpleNameIndex.get(simpleName);
     }
 
     // Nouvelle méthode utilitaire pour analyser le contexte d'un identifiant dans le code
@@ -3957,5 +4186,314 @@ public class ProcyonAdvancedGUI extends JFrame {
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(regex).matcher(json);
         if (m.find()) return m.group(1);
         return "";
+    }
+
+        // Tronque une chaîne pour limiter la taille des prompts envoyés à l'IA
+        private String limitString(String s, int max) {
+            if (s == null) return "";
+            if (s.length() <= max) return s;
+            return s.substring(0, max);
+        }
+
+    // Analyse Ollama sur une sélection multiple et preview des renommages
+    private void analyzeSelectedClassesWithOllama(javax.swing.tree.TreePath[] paths) {
+        java.util.List<String> selectedClasses = new java.util.ArrayList<>();
+        for (javax.swing.tree.TreePath p : paths) {
+            Object nodeObj = ((DefaultMutableTreeNode) p.getLastPathComponent()).getUserObject();
+            if (nodeObj instanceof TreeManager.ClassNode) {
+                selectedClasses.add(((TreeManager.ClassNode) nodeObj).fullPath);
+            }
+        }
+        if (selectedClasses.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Aucune classe sélectionnée.");
+            return;
+        }
+
+        JDialog wait = new JDialog(this, "Analyse Ollama (sélection)", true);
+        JProgressBar bar = new JProgressBar(0, selectedClasses.size());
+        bar.setStringPainted(true);
+        JLabel status = new JLabel("Préparation (2 threads, batch 12)...");
+        wait.setLayout(new BorderLayout());
+        wait.add(status, BorderLayout.NORTH);
+        wait.add(bar, BorderLayout.SOUTH);
+        wait.setSize(520, 110);
+        wait.setLocationRelativeTo(this);
+
+        new Thread(() -> {
+            java.util.concurrent.ConcurrentMap<String, String> renameMap = new java.util.concurrent.ConcurrentHashMap<>();
+            java.util.concurrent.ConcurrentMap<String, String> oldToNewSimpleName = new java.util.concurrent.ConcurrentHashMap<>();
+            java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger(0);
+
+            final int THREADS = 2;
+            final int BATCH_SIZE = 12;
+            final int CODE_LIMIT = 6000;
+
+            java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(THREADS);
+
+            for (int start = 0; start < selectedClasses.size(); start += BATCH_SIZE) {
+                int end = Math.min(start + BATCH_SIZE, selectedClasses.size());
+                java.util.List<String> batch = selectedClasses.subList(start, end);
+                java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+                for (String classKey : batch) {
+                    futures.add(pool.submit(() -> {
+                        try {
+                            String codeFull = modifiedCode.containsKey(classKey)
+                                    ? modifiedCode.get(classKey)
+                                    : decompilerManager.decompileClassToString(classKey, classBytes.get(classKey));
+                            String code = limitString(codeFull, CODE_LIMIT);
+                            String simpleClassName = getSimpleClassName(classKey);
+
+                            // Contexte d’usages (limité)
+                            Set<String> usages = new HashSet<>();
+                            for (Map.Entry<String, Set<String>> e : referencesTo.entrySet()) {
+                                if (e.getValue().contains(classKey)) usages.add(e.getKey());
+                            }
+                            StringBuilder usagesCode = new StringBuilder();
+                            for (String usage : usages) {
+                                usagesCode.append("// use: ").append(usage).append("\n");
+                                String usageCode = (modifiedCode.containsKey(usage) ? modifiedCode.get(usage)
+                                        : decompilerManager.decompileClassToString(usage, classBytes.get(usage)));
+                                usagesCode.append(limitString(usageCode, 800)).append("\n\n");
+                            }
+
+                            String prompt = "Tu reçois le code d'une classe obfusquée d'un mod MC + extraits d'usages.\n" +
+                                    "Retourne strictement JSON: {\"suggestedClassName\":\"...\",\"suggestedPackage\":\"...\",\"reasoning\":\"...\"}\n\n" +
+                                    "// code\n" + code + "\n\n// usages\n" + usagesCode;
+
+                            String ollamaResponse = OllamaApi.askOllama("gpt-oss:20b", prompt);
+                            String jsonCandidate;
+                            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{[^}]+\\}").matcher(ollamaResponse);
+                            if (m.find()) {
+                                jsonCandidate = m.group();
+                            } else {
+                                jsonCandidate = ollamaResponse;
+                            }
+                            String suggestedClassName = extractJsonField(jsonCandidate, "suggestedClassName");
+                            String suggestedPackage = extractJsonField(jsonCandidate, "suggestedPackage");
+                            if (suggestedClassName == null || suggestedClassName.isEmpty()) suggestedClassName = simpleClassName;
+                            if (suggestedPackage == null || suggestedPackage.isEmpty()) suggestedPackage = "fr/paladium/palamod/autoai";
+
+                            String newKey = suggestedPackage.replace('.', '/').replace('\\', '/') + "/" + suggestedClassName + ".class";
+                            if (!newKey.equals(classKey)) {
+                                renameMap.put(classKey, newKey);
+                                oldToNewSimpleName.put(simpleClassName, suggestedClassName);
+                                String newCode = updatePackageInCode(codeFull, suggestedPackage.replace('/', '.'));
+                                synchronized (modifiedCode) {
+                                    modifiedCode.put(classKey, newCode);
+                                }
+                            }
+                        } catch (Exception ex) {
+                            System.out.println("[Ollama batch] Erreur pour " + classKey + " : " + ex.getMessage());
+                        } finally {
+                            int p = progress.incrementAndGet();
+                            SwingUtilities.invokeLater(() -> {
+                                bar.setValue(p);
+                                status.setText("Analyse (" + p + "/" + selectedClasses.size() + ")");
+                            });
+                        }
+                        return null;
+                    }));
+                }
+
+                // Attente de fin du batch
+                for (java.util.concurrent.Future<?> f : futures) {
+                    try { f.get(); } catch (Exception ignore) {}
+                }
+            }
+
+            pool.shutdown();
+
+            SwingUtilities.invokeLater(wait::dispose);
+            if (renameMap.isEmpty()) {
+                SwingUtilities.invokeLater(() ->
+                        JOptionPane.showMessageDialog(this, "Aucune proposition de renommage pour la sélection."));
+            } else {
+                SwingUtilities.invokeLater(() -> showRenamePreviewAndApply(new HashMap<>(renameMap), new HashMap<>(oldToNewSimpleName),
+                        "Prévisualisation (sélection) — " + renameMap.size() + " renommages proposés"));
+            }
+        }).start();
+
+        wait.setVisible(true);
+    }
+
+    // Analyse toutes les classes avec Ollama et propose un nouvel arbre en preview
+    private void analyzeAllWithOllamaPreview() {
+        if (classBytes.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Aucune classe chargée.");
+            return;
+        }
+        JDialog dlg = new JDialog(this, "Analyse Ollama (toutes les classes)", true);
+        JProgressBar bar = new JProgressBar(0, classBytes.size());
+        bar.setStringPainted(true);
+        JLabel status = new JLabel("Initialisation (2 threads, batch 12)...");
+        dlg.setLayout(new BorderLayout());
+        dlg.add(status, BorderLayout.NORTH);
+        dlg.add(bar, BorderLayout.SOUTH);
+        dlg.setSize(520, 110);
+        dlg.setLocationRelativeTo(this);
+
+        new Thread(() -> {
+            java.util.concurrent.ConcurrentMap<String, String> renameMap = new java.util.concurrent.ConcurrentHashMap<>();
+            java.util.concurrent.ConcurrentMap<String, String> oldToNewSimpleName = new java.util.concurrent.ConcurrentHashMap<>();
+            java.util.concurrent.atomic.AtomicInteger progress = new java.util.concurrent.atomic.AtomicInteger(0);
+
+            final int THREADS = 2;
+            final int BATCH_SIZE = 12;
+            final int CODE_LIMIT = 6000;
+
+            java.util.List<String> allKeys = new java.util.ArrayList<>(classBytes.keySet());
+            java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(THREADS);
+
+            for (int start = 0; start < allKeys.size(); start += BATCH_SIZE) {
+                int end = Math.min(start + BATCH_SIZE, allKeys.size());
+                java.util.List<String> batch = allKeys.subList(start, end);
+                java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+
+                for (String classKey : batch) {
+                    futures.add(pool.submit(() -> {
+                        try {
+                            String codeFull = modifiedCode.containsKey(classKey)
+                                    ? modifiedCode.get(classKey)
+                                    : decompilerManager.decompileClassToString(classKey, classBytes.get(classKey));
+                            String code = limitString(codeFull, CODE_LIMIT);
+                            String simpleClassName = getSimpleClassName(classKey);
+
+                            // Contexte d’usages (limité)
+                            Set<String> usages = new HashSet<>();
+                            for (Map.Entry<String, Set<String>> e : referencesTo.entrySet()) {
+                                if (e.getValue().contains(classKey)) usages.add(e.getKey());
+                            }
+                            StringBuilder usagesCode = new StringBuilder();
+                            for (String usage : usages) {
+                                usagesCode.append("// use: ").append(usage).append("\n");
+                                String usageCode = (modifiedCode.containsKey(usage) ? modifiedCode.get(usage)
+                                        : decompilerManager.decompileClassToString(usage, classBytes.get(usage)));
+                                usagesCode.append(limitString(usageCode, 800)).append("\n\n");
+                            }
+
+                            String prompt = "Tu reçois le code d'une classe obfusquée d'un mod MC + extraits d'usages.\n" +
+                                    "Retourne strictement JSON: {\"suggestedClassName\":\"...\",\"suggestedPackage\":\"...\",\"reasoning\":\"...\"}\n\n" +
+                                    "// code\n" + code + "\n\n// usages\n" + usagesCode;
+
+                            String ollamaResponse = OllamaApi.askOllama("gpt-oss:20b", prompt);
+                            String jsonCandidate;
+                            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\{[^}]+\\}").matcher(ollamaResponse);
+                            if (m.find()) {
+                                jsonCandidate = m.group();
+                            } else {
+                                jsonCandidate = ollamaResponse;
+                            }
+                            String suggestedClassName = extractJsonField(jsonCandidate, "suggestedClassName");
+                            String suggestedPackage = extractJsonField(jsonCandidate, "suggestedPackage");
+                            if (suggestedClassName == null || suggestedClassName.isEmpty()) suggestedClassName = simpleClassName;
+                            if (suggestedPackage == null || suggestedPackage.isEmpty()) suggestedPackage = "fr/paladium/palamod/autoai";
+
+                            String newKey = suggestedPackage.replace('.', '/').replace('\\', '/') + "/" + suggestedClassName + ".class";
+                            if (!newKey.equals(classKey)) {
+                                renameMap.put(classKey, newKey);
+                                oldToNewSimpleName.put(simpleClassName, suggestedClassName);
+                                String newCode = updatePackageInCode(codeFull, suggestedPackage.replace('/', '.'));
+                                synchronized (modifiedCode) {
+                                    modifiedCode.put(classKey, newCode);
+                                }
+                            }
+                        } catch (Exception ex) {
+                            System.out.println("[Ollama all] Erreur pour " + classKey + " : " + ex.getMessage());
+                        } finally {
+                            int p = progress.incrementAndGet();
+                            SwingUtilities.invokeLater(() -> {
+                                bar.setValue(p);
+                                status.setText("Analyse (" + p + "/" + allKeys.size() + ")");
+                            });
+                        }
+                        return null;
+                    }));
+                }
+
+                // Attente de fin du batch
+                for (java.util.concurrent.Future<?> f : futures) {
+                    try { f.get(); } catch (Exception ignore) {}
+                }
+            }
+
+            pool.shutdown();
+
+            SwingUtilities.invokeLater(dlg::dispose);
+            if (renameMap.isEmpty()) {
+                SwingUtilities.invokeLater(() ->
+                        JOptionPane.showMessageDialog(this, "Aucune proposition de renommage via Ollama."));
+            } else {
+                SwingUtilities.invokeLater(() -> showRenamePreviewAndApply(new HashMap<>(renameMap), new HashMap<>(oldToNewSimpleName),
+                        "Prévisualisation (toutes classes) — " + renameMap.size() + " renommages proposés"));
+            }
+        }).start();
+
+        dlg.setVisible(true);
+    }
+
+    // Affiche une preview d’arbre des nouvelles clés et applique si confirmé
+    private void showRenamePreviewAndApply(Map<String, String> renameMap, Map<String, String> oldToNewSimpleName, String title) {
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode("Nouveau projet (preview)");
+        for (String newKey : renameMap.values()) {
+            addPathToTree(root, newKey);
+        }
+        JTree previewTree = new JTree(root);
+        previewTree.setRootVisible(true);
+        JScrollPane scroll = new JScrollPane(previewTree);
+        scroll.setPreferredSize(new java.awt.Dimension(500, 400));
+
+        Object[] options = {"Appliquer", "Annuler"};
+        int res = JOptionPane.showOptionDialog(this, scroll, title,
+                JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
+        if (res == 0) {
+            applyRenameMap(renameMap, oldToNewSimpleName);
+        }
+    }
+
+    // Ajoute un chemin de type a/b/c/Classe.class dans l’arbre de preview
+    private void addPathToTree(DefaultMutableTreeNode root, String classKey) {
+        String[] parts = classKey.split("/");
+        DefaultMutableTreeNode current = root;
+        for (String part : parts) {
+            DefaultMutableTreeNode child = null;
+            for (int i = 0; i < current.getChildCount(); i++) {
+                DefaultMutableTreeNode n = (DefaultMutableTreeNode) current.getChildAt(i);
+                if (part.equals(n.getUserObject())) {
+                    child = n;
+                    break;
+                }
+            }
+            if (child == null) {
+                child = new DefaultMutableTreeNode(part);
+                current.add(child);
+            }
+            current = child;
+        }
+    }
+
+    // Applique les renommages (maps) puis met à jour références et arbre
+    private void applyRenameMap(Map<String, String> renameMap, Map<String, String> oldToNewSimpleName) {
+        // Appliquer les renommages de clés et structures
+        for (Map.Entry<String, String> e : renameMap.entrySet()) {
+            String oldKey = e.getKey();
+            String newKey = e.getValue();
+            classBytes.put(newKey, classBytes.remove(oldKey));
+            if (modifiedCode.containsKey(oldKey)) modifiedCode.put(newKey, modifiedCode.remove(oldKey));
+            if (openTabs.containsKey(oldKey)) openTabs.put(newKey, openTabs.remove(oldKey));
+            if (classToDisplayName.containsKey(oldKey)) classToDisplayName.put(newKey, classToDisplayName.remove(oldKey));
+        }
+        // Re-indexation noms simples
+        reindexAllSimpleNames();
+
+        // Mise à jour des références dans le code décompilé
+        if (oldToNewSimpleName != null && !oldToNewSimpleName.isEmpty()) {
+            updateReferencesAfterAIRename(oldToNewSimpleName);
+        }
+
+        // Rafraîchir l’arborescence
+        updateTreeIncrementally(new ArrayList<>(classBytes.keySet()));
+
+        JOptionPane.showMessageDialog(this, "Renommages appliqués et arborescence mise à jour.");
     }
 } 
