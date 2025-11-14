@@ -1,0 +1,27 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.bitbucket.mstrobel:procyon-compilertools:0.6.0'
+    implementation 'com.fifesoft:rsyntaxtextarea:3.3.3'
+    implementation 'org.ow2.asm:asm:9.7'
+    implementation 'org.ow2.asm:asm-tree:9.7'
+    implementation 'com.formdev:flatlaf:3.2.5'
+}
+
+application {
+    mainClass = 'ProcyonAdvancedGUI'
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+} 
